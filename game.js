@@ -92,10 +92,10 @@ const ENEMY_KINDS = {
 };
 
 const POWERUP_KINDS = {
-  rapid: { color: "#5ce1ff", emoji: "⚡", dur: 7 },
-  shield: { color: "#7dffb3", emoji: "🛡", dur: 0 },
-  spread: { color: "#ffd166", emoji: "✦", dur: 8 },
-  life: { color: "#ff6bcb", emoji: "♥", dur: 0 },
+  rapid: { color: "#5ce1ff", glow: "rgba(92, 225, 255, 0.85)", icon: "⚡", dur: 7 },
+  shield: { color: "#7dffb3", glow: "rgba(125, 255, 179, 0.85)", icon: "🛡️", dur: 0 },
+  spread: { color: "#ffd166", glow: "rgba(255, 209, 102, 0.9)", icon: "🔱", dur: 8 },
+  life: { color: "#ff6bcb", glow: "rgba(255, 107, 203, 0.85)", icon: "❤️", dur: 0 },
 };
 
 /* ---------- Images ---------- */
@@ -315,7 +315,7 @@ function maybeDropPickup(x, y) {
 function applyPickup(p, kind) {
   const def = POWERUP_KINDS[kind];
   if (!def) return;
-  burst(p.x, p.y, def.color, 14, def.emoji);
+  burst(p.x, p.y, def.color, 14, def.icon);
   confetti(p.x, p.y);
   if (kind === "rapid") p.rapidUntil = Math.max(p.rapidUntil, def.dur);
   else if (kind === "spread") p.spreadUntil = Math.max(p.spreadUntil, def.dur);
@@ -982,6 +982,25 @@ function update(dt) {
 }
 
 /* ---------- Draw ---------- */
+function drawPickup(pk) {
+  const def = POWERUP_KINDS[pk.type] || POWERUP_KINDS.rapid;
+  const bob = Math.sin(pk.wobble) * 2.5;
+  const x = pk.x;
+  const y = pk.y + bob;
+  ctx.save();
+  ctx.font = "800 26px Nunito, sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.shadowColor = def.glow || def.color;
+  ctx.shadowBlur = 14;
+  ctx.fillStyle = "rgba(255,255,255,0.95)";
+  ctx.fillText(def.icon, x, y);
+  ctx.shadowBlur = 6;
+  ctx.fillStyle = def.color;
+  ctx.fillText(def.icon, x, y);
+  ctx.restore();
+}
+
 function drawImg(im, x, y, w, h, rot) {
   if (!im || !im.complete || !im.naturalWidth) return false;
   ctx.save();
@@ -1076,19 +1095,7 @@ function drawWorld() {
     ctx.lineWidth = Math.max(1, w.thick * 0.55);
     ctx.beginPath(); ctx.arc(w.x, w.y, w.r * 0.78, 0, Math.PI * 2); ctx.stroke();
   }
-  for (const pk of pickups) {
-    const def = POWERUP_KINDS[pk.type] || POWERUP_KINDS.rapid;
-    ctx.fillStyle = def.color;
-    ctx.beginPath(); ctx.arc(pk.x, pk.y, 11, 0, Math.PI * 2); ctx.fill();
-    ctx.strokeStyle = "rgba(255,255,255,0.7)"; ctx.lineWidth = 2;
-    ctx.stroke();
-    if (cuteMode) {
-      ctx.font = "13px Nunito, sans-serif";
-      ctx.textAlign = "center"; ctx.textBaseline = "middle";
-      ctx.fillStyle = "#1a1030";
-      ctx.fillText(def.emoji, pk.x, pk.y + 0.5);
-    }
-  }
+  for (const pk of pickups) drawPickup(pk);
   for (const e of enemies) drawEnemy(e);
   for (const c of covers) {
     ctx.globalAlpha = 0.45 + 0.55 * (c.hp / 2);

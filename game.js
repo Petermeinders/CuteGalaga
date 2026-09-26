@@ -61,7 +61,7 @@ const WINGS = [
 const CORES = [
   { id: "green", name: "Buddy Core", src: "assets/builder/core-green.png", blurb: "Classic smiling buddy." },
   { id: "star", name: "Star Shield", src: "assets/builder/core-star.png", blurb: "Absorbs 1 hit each wave." },
-  { id: "blue", name: "Pulse Orb", src: "assets/builder/core-blue.png", blurb: "Periodic nova blast." },
+  { id: "blue", name: "Pulse Orb", src: "assets/builder/core-blue.png", blurb: "Big nova shockwave every few sec." },
   { id: "rocket", name: "Rocket Core", src: "assets/builder/core-rocket.png", blurb: "Extra life at start." },
 ];
 
@@ -78,6 +78,25 @@ const BUG_SRC = [
   "assets/enemies/bug-purple.png",
   "assets/enemies/bug-brown.png",
 ];
+
+/** @type {Record<string, { hp: number, w: number, h: number, color: string, pts: number, diveAggro?: number, aimShots?: boolean, diveStyle?: string, shotRate?: number, blink?: boolean, neverDive?: boolean, bug?: number }>} */
+const ENEMY_KINDS = {
+  boss: { hp: 2, w: 26, h: 20, color: "#ff6bcb", pts: 150, diveAggro: 0.45, aimShots: true, shotRate: 1.1, bug: 3 },
+  butterfly: { hp: 1, w: 22, h: 18, color: "#5ce1ff", pts: 80, diveAggro: 1.0, shotRate: 0.9, bug: 2 },
+  bee: { hp: 1, w: 22, h: 18, color: "#ffd166", pts: 50, diveAggro: 1.15, shotRate: 1.0, bug: 1 },
+  wasp: { hp: 1, w: 20, h: 16, color: "#95d5b2", pts: 70, diveAggro: 2.3, diveStyle: "straight", shotRate: 0.75, bug: 1 },
+  beetle: { hp: 2, w: 24, h: 20, color: "#bc6c25", pts: 95, diveAggro: 0.35, shotRate: 0.42, bug: 3 },
+  moth: { hp: 1, w: 21, h: 17, color: "#bdb2ff", pts: 65, diveAggro: 0.8, aimShots: true, diveStyle: "homing", shotRate: 1.4, bug: 2 },
+  firefly: { hp: 1, w: 20, h: 16, color: "#ffe566", pts: 60, diveAggro: 1.05, blink: true, shotRate: 0.8, bug: 0 },
+  sniper: { hp: 1, w: 22, h: 18, color: "#ff8fab", pts: 75, diveAggro: 0.25, neverDive: true, aimShots: true, shotRate: 1.6, bug: 2 },
+};
+
+const POWERUP_KINDS = {
+  rapid: { color: "#5ce1ff", emoji: "⚡", dur: 7 },
+  shield: { color: "#7dffb3", emoji: "🛡", dur: 0 },
+  spread: { color: "#ffd166", emoji: "✦", dur: 8 },
+  life: { color: "#ff6bcb", emoji: "♥", dur: 0 },
+};
 
 /* ---------- Images ---------- */
 const imgCache = new Map();
@@ -188,6 +207,9 @@ let enemyBullets = [];
 let enemies = [];
 let covers = [];
 let particles = [];
+let pickups = [];
+let pulseWaves = [];
+let screenFlash = 0;
 let formation = { ox: 0, dir: 1, speed: 40, drop: 0 };
 
 function slowFactor() { return slowMo ? 0.5 : 1; }
@@ -199,9 +221,107 @@ function makePlayer(id, y, dir, color) {
     speed: 280 * (wing.speed || 1),
     hitScale: wing.hitScale || 1,
     cooldown: 0, invuln: 1.2, dir, lives: coreIdx === 3 ? 4 : 3,
-    shield: coreIdx === 1, pulseCd: coreIdx === 2 ? 1.5 : 999,
+    shield: coreIdx === 1, pulseCd: coreIdx === 2 ? 1.2 : 999,
+    rapidUntil: 0, spreadUntil: 0,
     dragX: null, left: false, right: false, fire: false, color,
   };
+}
+
+function nearestLivingPlayer(fromY) {
+  const alive = players.filter((p) => p.lives > 0);
+  if (!alive.length) return null;
+  let best = alive[0];
+  for (const p of alive) {
+    if (Math.abs(p.y - fromY) < Math.abs(best.y - fromY)) best = p;
+  }
+  return best;
+}
+
+function pickEnemyKind(row, col, cols, waveNum) {
+  if (row === 0) {
+    if (col % 4 === 0) return "boss";
+    return ["wasp", "moth", "beetle", "sniper"][(col + waveNum) % 4];
+  }
+  const pool = ["bee", "butterfly", "wasp", "moth", "firefly", "beetle", "sniper"];
+  return pool[(row * cols + col + waveNum) % pool.length];
+}
+
+function createEnemy(kind, bx, by, slot, row, cols) {
+  const def = ENEMY_KINDS[kind] || ENEMY_KINDS.bee;
+  return {
+    bx,
+    by,
+    x: bx,
+    y: coopMode ? by : by - 80 - row * 20,
+    kind,
+    w: def.w,
+    h: def.h,
+    hp: def.hp,
+    maxHp: def.hp,
+    color: def.color,
+    pts: def.pts,
+    diveAggro: def.diveAggro ?? 1,
+    aimShots: !!def.aimShots,
+    diveStyle: def.diveStyle || "sine",
+    shotRate: def.shotRate ?? 1,
+    blink: !!def.blink,
+    blinkT: 0,
+    neverDive: !!def.neverDive,
+    diveTx: bx,
+    mode: "formation",
+    t: 0,
+    enterDelay: coopMode ? 0 : (row * cols + slot) * 0.04,
+    diveDir: 1,
+    bug: def.bug != null ? def.bug : slot % BUG_SRC.length,
+  };
+}
+
+function enemyBulletSpeed() {
+  return 180 + wave * 12;
+}
+
+function shootFromEnemy(e) {
+  const spd = enemyBulletSpeed() * (coopMode ? 1 : 1);
+  const target = e.aimShots ? nearestLivingPlayer(e.y) : null;
+  if (target) {
+    const dx = target.x - e.x;
+    const dy = target.y - e.y;
+    const len = Math.hypot(dx, dy) || 1;
+    const vx = (dx / len) * spd * 0.65;
+    let vy = (dy / len) * spd;
+    if (coopMode && Math.abs(dy) < 20) vy = target.y < e.y ? -spd : spd;
+    enemyBullets.push({ x: e.x, y: e.y, vx, vy });
+    return;
+  }
+  let vy = spd;
+  if (coopMode) {
+    const nearest = nearestLivingPlayer(e.y);
+    vy = nearest && nearest.y < e.y ? -spd : spd;
+  }
+  enemyBullets.push({ x: e.x, y: e.y, vx: 0, vy });
+}
+
+function maybeDropPickup(x, y) {
+  if (Math.random() > 0.13) return;
+  const roll = Math.random();
+  let type = "rapid";
+  if (roll < 0.38) type = "rapid";
+  else if (roll < 0.62) type = "shield";
+  else if (roll < 0.84) type = "spread";
+  else type = "life";
+  pickups.push({ x, y, vy: 55, type, wobble: Math.random() * Math.PI * 2 });
+}
+
+function applyPickup(p, kind) {
+  const def = POWERUP_KINDS[kind];
+  if (!def) return;
+  burst(p.x, p.y, def.color, 14, def.emoji);
+  confetti(p.x, p.y);
+  if (kind === "rapid") p.rapidUntil = Math.max(p.rapidUntil, def.dur);
+  else if (kind === "spread") p.spreadUntil = Math.max(p.spreadUntil, def.dur);
+  else if (kind === "shield") { p.shield = true; if (cuteMode) sfxShield(); }
+  else if (kind === "life") { p.lives += 1; updateHud(); }
+  if (cuteMode) sfxPop();
 }
 
 function resizeForMode() {
@@ -388,7 +508,7 @@ function addCoverBlock(cx, y, bw, bh, color, flat) {
 }
 
 function spawnWave(n) {
-  enemies = []; enemyBullets = []; bullets = [];
+  enemies = []; enemyBullets = []; bullets = []; pickups = [];
   formation = { ox: 0, dir: 1, speed: (36 + n * 4) * slowFactor(), drop: 0 };
   for (const p of players) if (coreIdx === 1) p.shield = true;
 
@@ -398,22 +518,13 @@ function spawnWave(n) {
   const gapY = coopMode ? 28 : 40;
   const startX = (W - (cols - 1) * gapX) / 2;
   const startY = coopMode ? H / 2 - ((rows - 1) * gapY) / 2 : 70;
-  const colors = { bee: "#ffd166", butterfly: "#5ce1ff", boss: "#ff6bcb" };
 
   for (let r = 0; r < rows; r++) {
     for (let c = 0; c < cols; c++) {
-      const kind = r === 0 ? "boss" : r === 1 ? "butterfly" : "bee";
+      const kind = pickEnemyKind(r, c, cols, n);
       const bx = startX + c * gapX;
       const by = startY + r * gapY;
-      enemies.push({
-        bx, by, x: bx, y: coopMode ? by : by - 80 - r * 20,
-        w: kind === "boss" ? 26 : 22, h: kind === "boss" ? 20 : 18,
-        kind, mode: "formation", t: 0, hp: kind === "boss" ? 2 : 1,
-        color: colors[kind],
-        enterDelay: coopMode ? 0 : (r * cols + c) * 0.04,
-        diveDir: 1,
-        bug: (r * cols + c) % BUG_SRC.length,
-      });
+      enemies.push(createEnemy(kind, bx, by, c, r, cols));
     }
   }
   waveMsgTimer = 1.4;
@@ -424,7 +535,7 @@ function startGame() {
   ensureAudio();
   resizeForMode();
   showGameChrome();
-  score = 0; wave = 1; particles = []; players = [];
+  score = 0; wave = 1; particles = []; pickups = []; pulseWaves = []; screenFlash = 0; players = [];
   if (coopMode) {
     players.push(makePlayer(0, H - 34, -1, "#5ce1ff"));
     players.push(makePlayer(1, 34, 1, "#ff6bcb"));
@@ -510,7 +621,7 @@ function hitCover(bullet) {
 
 function fireFrom(p) {
   if (p.cooldown > 0 || p.lives <= 0) return;
-  const pattern = BLASTERS[blasterIdx].pattern;
+  const pattern = p.spreadUntil > 0 ? "fan" : BLASTERS[blasterIdx].pattern;
   const speed = pattern === "heavy" ? 400 : 520;
   const shotVy = p.dir === -1 ? -speed : speed;
   const mx = p.x;
@@ -529,32 +640,53 @@ function fireFrom(p) {
     mk(0, 0, shotVy, 2); // heavy
   }
 
+  const rapid = p.rapidUntil > 0 ? 0.62 : 1;
   p.cooldown = autofire
-    ? (pattern === "fan" ? 0.34 : pattern === "heavy" ? 0.4 : 0.28)
-    : (pattern === "fan" ? 0.26 : pattern === "heavy" ? 0.32 : 0.2);
+    ? (pattern === "fan" ? 0.34 : pattern === "heavy" ? 0.4 : 0.28) * rapid
+    : (pattern === "fan" ? 0.26 : pattern === "heavy" ? 0.32 : 0.2) * rapid;
   if (cuteMode) sfxShoot();
 }
 
 function triggerPulse(p) {
   if (coreIdx !== 2 || p.pulseCd > 0 || p.lives <= 0) return;
-  p.pulseCd = 4.5;
-  burst(p.x, p.y, "#b197fc", 18);
+  p.pulseCd = 5.2;
+  const radius = coopMode ? 210 : 185;
+  screenFlash = 0.35;
+  pulseWaves.push({ x: p.x, y: p.y, r: 12, maxR: radius, life: 0.55, thick: 5 });
+  pulseWaves.push({ x: p.x, y: p.y, r: 8, maxR: radius * 0.72, life: 0.4, thick: 3 });
+  burst(p.x, p.y, "#b197fc", 42);
+  burst(p.x, p.y, "#5ce1ff", 28);
   confetti(p.x, p.y);
-  if (cuteMode) sfxPulse();
+  if (cuteMode) {
+    sfxPulse();
+    setTimeout(() => beep({ freq: 520, dur: 0.14, type: "sine", gain: 0.05, slide: 180 }), 60);
+    setTimeout(() => beep({ freq: 880, dur: 0.18, type: "triangle", gain: 0.04, slide: -240 }), 140);
+  }
   for (let i = enemyBullets.length - 1; i >= 0; i--) {
     const b = enemyBullets[i];
-    if (Math.hypot(b.x - p.x, b.y - p.y) < 90) enemyBullets.splice(i, 1);
+    if (Math.hypot(b.x - p.x, b.y - p.y) < radius * 1.15) enemyBullets.splice(i, 1);
+  }
+  for (let i = covers.length - 1; i >= 0; i--) {
+    const c = covers[i];
+    if (Math.hypot(c.x - p.x, c.y - p.y) < radius * 0.85) {
+      burst(c.x, c.y, c.color, 6);
+      covers.splice(i, 1);
+    }
   }
   for (let i = enemies.length - 1; i >= 0; i--) {
     const e = enemies[i];
-    if (Math.hypot(e.x - p.x, e.y - p.y) < 100) {
-      e.hp -= 1;
-      burst(e.x, e.y, e.color, 8);
-      if (e.hp <= 0) {
-        score += 40; confetti(e.x, e.y);
-        if (cuteMode) sfxPop();
-        enemies.splice(i, 1);
-      }
+    const d = Math.hypot(e.x - p.x, e.y - p.y);
+    if (d > radius) continue;
+    const falloff = 1 - d / radius;
+    const dmg = e.kind === "boss" || e.kind === "beetle" ? 1 + (falloff > 0.55 ? 1 : 0) : 1 + (falloff > 0.35 ? 1 : 0);
+    e.hp -= dmg;
+    burst(e.x, e.y, e.color, 10 + (falloff * 8) | 0);
+    if (e.hp <= 0) {
+      score += e.pts || 50;
+      confetti(e.x, e.y);
+      maybeDropPickup(e.x, e.y);
+      if (cuteMode) sfxPop();
+      enemies.splice(i, 1);
     }
   }
   updateHud();
@@ -676,12 +808,38 @@ function update(dt) {
   }
   if (state !== STATE.PLAY && state !== STATE.WAVE) return;
   if (waveMsgTimer > 0) waveMsgTimer -= dt;
+  if (screenFlash > 0) screenFlash -= dt;
   const sf = slowFactor();
+
+  for (let i = pulseWaves.length - 1; i >= 0; i--) {
+    const w = pulseWaves[i];
+    w.life -= dt;
+    w.r += (w.maxR - w.r) * Math.min(1, 6 * dt);
+    if (w.life <= 0) pulseWaves.splice(i, 1);
+  }
+
+  for (let i = pickups.length - 1; i >= 0; i--) {
+    const pk = pickups[i];
+    pk.y += pk.vy * dt;
+    pk.wobble += dt * 5;
+    pk.x += Math.sin(pk.wobble) * 18 * dt;
+    if (pk.y > H + 24) { pickups.splice(i, 1); continue; }
+    for (const p of players) {
+      if (p.lives <= 0) continue;
+      if (Math.hypot(pk.x - p.x, pk.y - p.y) < 22) {
+        applyPickup(p, pk.type);
+        pickups.splice(i, 1);
+        break;
+      }
+    }
+  }
 
   for (const p of players) {
     if (p.lives <= 0) continue;
     p.cooldown = Math.max(0, p.cooldown - dt);
     p.invuln = Math.max(0, p.invuln - dt);
+    p.rapidUntil = Math.max(0, (p.rapidUntil || 0) - dt);
+    p.spreadUntil = Math.max(0, (p.spreadUntil || 0) - dt);
     if (coreIdx === 2) {
       p.pulseCd = Math.max(0, p.pulseCd - dt);
       if (p.pulseCd <= 0) triggerPulse(p);
@@ -744,30 +902,38 @@ function update(dt) {
     if (e.mode === "formation") {
       e.x = e.bx + formation.ox;
       e.y = e.by + (coopMode ? 0 : formation.drop);
-      if (diving < (coopMode ? 3 : 2) && Math.random() < 0.14 * dt * (0.7 + wave * 0.15) * sf) {
+      if (e.blink) e.blinkT = (e.blinkT || 0) + dt;
+      const maxDivers = coopMode ? 3 : 2;
+      const diveRoll = 0.14 * dt * (0.7 + wave * 0.12) * sf * (e.diveAggro ?? 1);
+      if (!e.neverDive && diving < maxDivers && Math.random() < diveRoll) {
         e.mode = "dive"; e.t = 0;
-        if (coopMode) {
-          const alive = players.filter((p) => p.lives > 0);
-          const target = alive[(Math.random() * alive.length) | 0];
-          e.diveDir = target && target.id === 1 ? -1 : 1;
-        } else e.diveDir = 1;
+        const target = nearestLivingPlayer(e.y);
+        if (coopMode && target) e.diveDir = target.id === 1 ? -1 : 1;
+        else e.diveDir = 1;
+        e.diveTx = target ? target.x : e.x;
         diving++;
       }
-      if (Math.random() < 0.08 * dt * wave * sf) {
-        let vy = 180 + wave * 12;
-        if (coopMode) {
-          const alive = players.filter((p) => p.lives > 0);
-          let nearest = alive[0];
-          for (const p of alive) if (Math.abs(p.y - e.y) < Math.abs(nearest.y - e.y)) nearest = p;
-          vy = nearest && nearest.y < e.y ? -(180 + wave * 12) : 180 + wave * 12;
-        }
-        enemyBullets.push({ x: e.x, y: e.y, vx: 0, vy });
-      }
+      if (Math.random() < 0.08 * dt * wave * sf * (e.shotRate ?? 1)) shootFromEnemy(e);
     } else if (e.mode === "dive") {
       e.t += dt;
-      e.x += Math.sin(e.t * 4) * 90 * dt;
-      e.y += (160 + wave * 18) * sf * dt * (e.diveDir || 1);
-      if (Math.random() < 0.55 * dt) enemyBullets.push({ x: e.x, y: e.y, vx: 0, vy: (e.diveDir || 1) * 220 });
+      const diveSp = (160 + wave * 18) * sf;
+      if (e.diveStyle === "straight") {
+        e.x += (e.diveTx - e.x) * Math.min(1, 2.8 * dt);
+        e.y += diveSp * dt * (e.diveDir || 1);
+      } else if (e.diveStyle === "homing") {
+        const target = nearestLivingPlayer(e.y);
+        if (target) e.diveTx += (target.x - e.diveTx) * Math.min(1, 2 * dt);
+        e.x += Math.sin(e.t * 5) * 60 * dt + (e.diveTx - e.x) * 0.5 * dt;
+        e.y += diveSp * dt * (e.diveDir || 1);
+      } else {
+        e.x += Math.sin(e.t * 4) * 90 * dt;
+        e.y += diveSp * dt * (e.diveDir || 1);
+      }
+      if (Math.random() < 0.55 * dt * (e.shotRate ?? 1)) {
+        const vy = (e.diveDir || 1) * 220;
+        if (e.aimShots) shootFromEnemy(e);
+        else enemyBullets.push({ x: e.x, y: e.y, vx: 0, vy });
+      }
       if (e.y > H + 40 || e.y < -40) { e.mode = "return"; e.y = coopMode ? H / 2 : -30; e.t = 0; }
     } else if (e.mode === "return") {
       const tx = e.bx + formation.ox, ty = e.by + (coopMode ? 0 : formation.drop);
@@ -785,14 +951,16 @@ function update(dt) {
     for (let j = bullets.length - 1; j >= 0; j--) {
       const b = bullets[j];
       if (rectsOverlap({ x: b.x, y: b.y, w: 5, h: 10 }, e)) {
+        if (e.blink && Math.sin((e.blinkT || 0) * 14) > 0.25) break;
         bullets.splice(j, 1);
         e.hp -= b.dmg || 1;
         burst(e.x, e.y, e.color, 6);
         if (e.hp <= 0) {
-          const pts = e.kind === "boss" ? 150 : e.kind === "butterfly" ? 80 : 50;
+          const pts = e.pts || 50;
           score += e.mode === "dive" ? pts * 2 : pts;
           burst(e.x, e.y, e.color, 14, "★");
           confetti(e.x, e.y);
+          maybeDropPickup(e.x, e.y);
           if (cuteMode) sfxPop();
           enemies.splice(i, 1);
           updateHud();
@@ -836,6 +1004,14 @@ function drawShip(p, flip) {
     ctx.lineWidth = 2;
     ctx.beginPath(); ctx.arc(0, 0, 22, 0, Math.PI * 2); ctx.stroke();
   }
+  if (coreIdx === 2) {
+    const ready = p.pulseCd <= 0.4;
+    ctx.strokeStyle = ready
+      ? `rgba(177, 151, 252, ${0.55 + 0.45 * Math.sin(performance.now() / 70)})`
+      : "rgba(92, 225, 255, 0.35)";
+    ctx.lineWidth = ready ? 3 : 2;
+    ctx.beginPath(); ctx.arc(0, 0, ready ? 28 : 24, 0, Math.PI * 2); ctx.stroke();
+  }
 
   const wingIm = loadImg(WINGS[wingIdx].src);
   const coreIm = loadImg(CORES[coreIdx].src);
@@ -849,11 +1025,15 @@ function drawShip(p, flip) {
 }
 
 function drawEnemy(e) {
+  ctx.save();
+  if (e.blink && Math.sin((e.blinkT || 0) * 14) > 0.25) ctx.globalAlpha = 0.38;
   if (cuteMode) {
     const im = loadImg(BUG_SRC[e.bug % BUG_SRC.length]);
-    if (drawImg(im, e.x, e.y, e.w * 2.2, e.h * 2.2, 0)) return;
+    if (drawImg(im, e.x, e.y, e.w * 2.2, e.h * 2.2, 0)) {
+      ctx.restore();
+      return;
+    }
   }
-  ctx.save();
   ctx.translate(e.x, e.y);
   ctx.fillStyle = e.color;
   ctx.beginPath();
@@ -887,6 +1067,28 @@ function drawWorld() {
   }
   ctx.fillStyle = "#ff8fab";
   for (const b of enemyBullets) ctx.fillRect(b.x - 2, b.y - 4, 4, 8);
+  for (const w of pulseWaves) {
+    const alpha = Math.max(0, w.life / 0.55);
+    ctx.strokeStyle = `rgba(92, 225, 255, ${alpha * 0.9})`;
+    ctx.lineWidth = w.thick;
+    ctx.beginPath(); ctx.arc(w.x, w.y, w.r, 0, Math.PI * 2); ctx.stroke();
+    ctx.strokeStyle = `rgba(177, 151, 252, ${alpha * 0.55})`;
+    ctx.lineWidth = Math.max(1, w.thick * 0.55);
+    ctx.beginPath(); ctx.arc(w.x, w.y, w.r * 0.78, 0, Math.PI * 2); ctx.stroke();
+  }
+  for (const pk of pickups) {
+    const def = POWERUP_KINDS[pk.type] || POWERUP_KINDS.rapid;
+    ctx.fillStyle = def.color;
+    ctx.beginPath(); ctx.arc(pk.x, pk.y, 11, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = "rgba(255,255,255,0.7)"; ctx.lineWidth = 2;
+    ctx.stroke();
+    if (cuteMode) {
+      ctx.font = "13px Nunito, sans-serif";
+      ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      ctx.fillStyle = "#1a1030";
+      ctx.fillText(def.emoji, pk.x, pk.y + 0.5);
+    }
+  }
   for (const e of enemies) drawEnemy(e);
   for (const c of covers) {
     ctx.globalAlpha = 0.45 + 0.55 * (c.hp / 2);
@@ -923,6 +1125,10 @@ function drawWorld() {
     ctx.textAlign = "center";
     ctx.fillText(`WAVE ${wave}`, W / 2, H / 2);
     ctx.globalAlpha = 1;
+  }
+  if (screenFlash > 0) {
+    ctx.fillStyle = `rgba(177, 151, 252, ${Math.min(0.28, screenFlash * 0.35)})`;
+    ctx.fillRect(0, 0, W, H);
   }
 }
 

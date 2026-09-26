@@ -67,9 +67,9 @@ const CORES = [
 
 const BLASTERS = [
   { id: "ray", name: "Ray Gun", src: "assets/builder/blaster-ray.png", blurb: "Single straight shot.", pattern: "single" },
-  { id: "tri", name: "Tri-Laser", src: "assets/builder/blaster-tri.png", blurb: "Three parallel beams.", pattern: "twin" },
+  { id: "tri", name: "Tri-Laser", src: "assets/builder/blaster-tri.png", blurb: "Three parallel beams.", pattern: "triple" },
   { id: "yellow", name: "Bubble Blaster", src: "assets/builder/blaster-yellow.png", blurb: "Wide fan spray.", pattern: "fan" },
-  { id: "missile", name: "Mini Missile", src: "assets/builder/blaster-missile.png", blurb: "Slower, punchier shots.", pattern: "heavy" },
+  { id: "missile", name: "Mini Missile", src: "assets/builder/blaster-missile.png", blurb: "Slow homing shot; pops on hit.", pattern: "missile" },
 ];
 
 const BUG_SRC = [
@@ -96,6 +96,7 @@ const POWERUP_KINDS = {
   shield: { color: "#7dffb3", glow: "rgba(125, 255, 179, 0.85)", icon: "🛡️", dur: 0 },
   spread: { color: "#ffd166", glow: "rgba(255, 209, 102, 0.9)", icon: "🔱", dur: 8 },
   explosive: { color: "#ff8fab", glow: "rgba(255, 143, 171, 0.9)", icon: "💣", dur: 9 },
+  upgrade: { color: "#caffbf", glow: "rgba(202, 255, 191, 0.95)", icon: "➕", dur: 14 },
   life: { color: "#ff6bcb", glow: "rgba(255, 107, 203, 0.85)", icon: "❤️", dur: 0 },
 };
 
@@ -223,7 +224,7 @@ function makePlayer(id, y, dir, color) {
     hitScale: wing.hitScale || 1,
     cooldown: 0, invuln: 1.2, dir, lives: coreIdx === 3 ? 4 : 3,
     shield: coreIdx === 1, pulseCd: coreIdx === 2 ? 1.2 : 999,
-    rapidUntil: 0, spreadUntil: 0, explosiveUntil: 0,
+    rapidUntil: 0, spreadUntil: 0, explosiveUntil: 0, upgradeUntil: 0,
     dragX: null, left: false, right: false, fire: false, color,
   };
 }
@@ -303,13 +304,14 @@ function shootFromEnemy(e) {
 }
 
 function maybeDropPickup(x, y) {
-  if (Math.random() > 0.14) return;
+  if (Math.random() > 0.15) return;
   const roll = Math.random();
   let type = "rapid";
-  if (roll < 0.26) type = "rapid";
-  else if (roll < 0.44) type = "shield";
-  else if (roll < 0.6) type = "spread";
-  else if (roll < 0.76) type = "explosive";
+  if (roll < 0.22) type = "rapid";
+  else if (roll < 0.38) type = "shield";
+  else if (roll < 0.52) type = "spread";
+  else if (roll < 0.66) type = "explosive";
+  else if (roll < 0.8) type = "upgrade";
   else type = "life";
   pickups.push({ x, y, vy: 55, type, wobble: Math.random() * Math.PI * 2 });
 }
@@ -322,6 +324,7 @@ function applyPickup(p, kind) {
   if (kind === "rapid") p.rapidUntil = Math.max(p.rapidUntil, def.dur);
   else if (kind === "spread") p.spreadUntil = Math.max(p.spreadUntil, def.dur);
   else if (kind === "explosive") p.explosiveUntil = Math.max(p.explosiveUntil || 0, def.dur);
+  else if (kind === "upgrade") p.upgradeUntil = Math.max(p.upgradeUntil || 0, def.dur);
   else if (kind === "shield") { p.shield = true; if (cuteMode) sfxShield(); }
   else if (kind === "life") { p.lives += 1; updateHud(); }
   if (cuteMode) sfxPop();
@@ -611,12 +614,15 @@ function confetti(x, y) {
 }
 
 function hitCover(bullet) {
+  const hw = bullet.w || 5;
+  const hh = bullet.h || 10;
   for (let i = covers.length - 1; i >= 0; i--) {
     const c = covers[i];
-    if (!rectsOverlap({ x: bullet.x, y: bullet.y, w: 5, h: 10 }, c)) continue;
+    if (!rectsOverlap({ x: bullet.x, y: bullet.y, w: hw, h: hh }, c)) continue;
     c.hp -= 1;
     burst(c.x, c.y, c.color, 4);
     if (c.hp <= 0) { burst(c.x, c.y, c.color, 8); covers.splice(i, 1); }
+    if (bulletShouldExplode(bullet)) splashExplosion(bullet.x, bullet.y, 46, 1);
     return true;
   }
   return false;
@@ -658,32 +664,123 @@ function splashExplosion(x, y, radius, dmg, skipEnemyIdx = -1) {
   }
 }
 
+function bulletShouldExplode(b) {
+  return b.kind === "missile" || !!b.explosive;
+}
+
+function nearestEnemyForHoming(b) {
+  const owner = players[b.owner];
+  if (!owner) return null;
+  let best = null;
+  let bestD = Infinity;
+  for (const e of enemies) {
+    if (e.enterDelay > 0) continue;
+    const dy = e.y - b.y;
+    if (owner.dir === -1 && dy > 40) continue;
+    if (owner.dir === 1 && dy < -40) continue;
+    const d = Math.hypot(e.x - b.x, e.y - b.y);
+    if (d < bestD) { bestD = d; best = e; }
+  }
+  return best;
+}
+
+function steerHomingBullet(b, dt) {
+  const e = nearestEnemyForHoming(b);
+  if (!e) return;
+  const dx = e.x - b.x;
+  const dy = e.y - b.y;
+  const len = Math.hypot(dx, dy) || 1;
+  const spd = b.speed || Math.hypot(b.vx, b.vy) || 260;
+  const tx = (dx / len) * spd;
+  const ty = (dy / len) * spd;
+  const t = Math.min(1, (b.turn || 4) * dt);
+  b.vx += (tx - b.vx) * t;
+  b.vy += (ty - b.vy) * t;
+}
+
+function applyBulletToEnemy(b, i, hitX, hitY) {
+  const e = enemies[i];
+  e.hp -= b.dmg || 1;
+  burst(e.x, e.y, e.color, 6);
+  const splash = bulletShouldExplode(b);
+  const radius = b.kind === "missile" ? 54 : 50;
+  if (e.hp <= 0) {
+    scoreEnemyKill(e);
+    enemies.splice(i, 1);
+    if (splash) splashExplosion(hitX, hitY, radius, 1);
+    return true;
+  }
+  if (splash) splashExplosion(hitX, hitY, radius, 1, i);
+  return true;
+}
+
 function fireFrom(p) {
   if (p.cooldown > 0 || p.lives <= 0) return;
-  const pattern = p.spreadUntil > 0 ? "fan" : BLASTERS[blasterIdx].pattern;
-  const speed = pattern === "heavy" ? 400 : 520;
-  const shotVy = p.dir === -1 ? -speed : speed;
+  let pattern = BLASTERS[blasterIdx].pattern;
+  if (p.spreadUntil > 0) pattern = "fan";
+  const up = (p.upgradeUntil || 0) > 0;
+  const rapid = p.rapidUntil > 0 ? 0.62 : 1;
+  const expBuff = (p.explosiveUntil || 0) > 0;
   const mx = p.x;
   const my = p.dir === -1 ? p.y - p.h / 2 : p.y + p.h / 2;
-  const explosive = (p.explosiveUntil || 0) > 0;
-  const mk = (ox, vx = 0, vy = shotVy, dmg = 1) => {
-    bullets.push({ x: mx + ox, y: my, vx, vy, owner: p.id, life: 2.5, dmg, explosive });
+  const dir = p.dir === -1 ? -1 : 1;
+
+  const pushBullet = (ox, vx, vy, dmg, kind, extra = {}) => {
+    const speed = Math.hypot(vx, vy);
+    bullets.push({
+      x: mx + ox,
+      y: my,
+      vx,
+      vy,
+      owner: p.id,
+      life: kind === "laser" ? 2.8 : 2.6,
+      dmg,
+      kind,
+      speed,
+      explosive: expBuff && kind !== "missile",
+      w: kind === "missile" ? (up ? 5 : 8) : (kind === "laser" ? 3 : 4),
+      h: kind === "missile" ? (up ? 7 : 11) : (kind === "laser" ? 16 : 10),
+      ...extra,
+    });
   };
 
-  if (pattern === "single") mk(0);
-  else if (pattern === "twin") { mk(-7); mk(7); }
-  else if (pattern === "fan") {
-    mk(0);
-    mk(-4, -140, shotVy * 0.92);
-    mk(4, 140, shotVy * 0.92);
+  if (pattern === "missile") {
+    const spd = up ? 360 : 210;
+    const offsets = up ? [-11, 0, 11] : [0];
+    for (const ox of offsets) {
+      pushBullet(ox, 0, dir * spd, up ? 1 : 2, "missile", {
+        homing: true,
+        turn: up ? 6 : 3.4,
+      });
+    }
+    p.cooldown = (up ? 0.3 : 0.46) * rapid;
+  } else if (pattern === "single") {
+    if (up) pushBullet(0, 0, dir * 660, 1, "laser");
+    else pushBullet(0, 0, dir * 520, 1, "bolt");
+    p.cooldown = (up ? 0.2 : 0.26) * rapid;
+  } else if (pattern === "triple" || pattern === "twin") {
+    const cols = up ? [-13, -4, 5, 14] : [-8, 0, 8];
+    const spd = dir * (up ? 580 : 520);
+    for (const ox of cols) {
+      pushBullet(ox, 0, spd, 1, up ? "laser" : "bolt");
+    }
+    p.cooldown = (up ? 0.24 : 0.28) * rapid;
+  } else if (pattern === "fan") {
+    if (up) {
+      for (const ox of [-10, 0, 10]) pushBullet(ox, 0, dir * 550, 1, "laser");
+      p.cooldown = 0.26 * rapid;
+    } else {
+      pushBullet(0, 0, dir * 520, 1, "bolt");
+      pushBullet(-4, -140, dir * 480, 1, "bolt");
+      pushBullet(4, 140, dir * 480, 1, "bolt");
+      p.cooldown = 0.26 * rapid;
+    }
   } else {
-    mk(0, 0, shotVy, 2); // heavy
+    pushBullet(0, 0, dir * 520, 1, "bolt");
+    p.cooldown = 0.28 * rapid;
   }
 
-  const rapid = p.rapidUntil > 0 ? 0.62 : 1;
-  p.cooldown = autofire
-    ? (pattern === "fan" ? 0.34 : pattern === "heavy" ? 0.4 : 0.28) * rapid
-    : (pattern === "fan" ? 0.26 : pattern === "heavy" ? 0.32 : 0.2) * rapid;
+  if (autofire) p.cooldown *= pattern === "fan" && !up ? 1.08 : 1;
   if (cuteMode) sfxShoot();
 }
 
@@ -881,6 +978,7 @@ function update(dt) {
     p.rapidUntil = Math.max(0, (p.rapidUntil || 0) - dt);
     p.spreadUntil = Math.max(0, (p.spreadUntil || 0) - dt);
     p.explosiveUntil = Math.max(0, (p.explosiveUntil || 0) - dt);
+    p.upgradeUntil = Math.max(0, (p.upgradeUntil || 0) - dt);
     if (coreIdx === 2) {
       p.pulseCd = Math.max(0, p.pulseCd - dt);
       if (p.pulseCd <= 0) triggerPulse(p);
@@ -898,6 +996,7 @@ function update(dt) {
 
   for (let i = bullets.length - 1; i >= 0; i--) {
     const b = bullets[i];
+    if (b.homing) steerHomingBullet(b, dt);
     b.x += b.vx * dt; b.y += b.vy * dt; b.life -= dt;
     if (coopMode) {
       const mid = H / 2;
@@ -991,21 +1090,14 @@ function update(dt) {
 
     for (let j = bullets.length - 1; j >= 0; j--) {
       const b = bullets[j];
-      if (rectsOverlap({ x: b.x, y: b.y, w: 5, h: 10 }, e)) {
+      const hw = b.w || 5;
+      const hh = b.h || 10;
+      if (rectsOverlap({ x: b.x, y: b.y, w: hw, h: hh }, e)) {
         if (e.blink && Math.sin((e.blinkT || 0) * 14) > 0.25) break;
         const hitX = b.x;
         const hitY = b.y;
-        const splash = !!b.explosive;
         bullets.splice(j, 1);
-        e.hp -= b.dmg || 1;
-        burst(e.x, e.y, e.color, 6);
-        if (e.hp <= 0) {
-          scoreEnemyKill(e);
-          enemies.splice(i, 1);
-          if (splash) splashExplosion(hitX, hitY, 50, 1);
-        } else {
-          if (splash) splashExplosion(hitX, hitY, 50, 1, i);
-        }
+        applyBulletToEnemy(b, i, hitX, hitY);
         break;
       }
     }
@@ -1023,6 +1115,59 @@ function update(dt) {
 }
 
 /* ---------- Draw ---------- */
+function drawPlayerBullet(b) {
+  const hw = b.w || 4;
+  const hh = b.h || 10;
+  if (b.kind === "laser") {
+    const ang = Math.atan2(b.vy, b.vx || 0.001);
+    const len = 22;
+    ctx.save();
+    ctx.translate(b.x, b.y);
+    ctx.rotate(ang);
+    const grd = ctx.createLinearGradient(0, 0, 0, len);
+    grd.addColorStop(0, "rgba(255,255,255,0.95)");
+    grd.addColorStop(0.45, "#5ce1ff");
+    grd.addColorStop(1, "rgba(92, 225, 255, 0)");
+    ctx.strokeStyle = grd;
+    ctx.lineWidth = 3;
+    ctx.lineCap = "round";
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.lineTo(0, len);
+    ctx.stroke();
+    ctx.restore();
+    return;
+  }
+  if (b.kind === "missile") {
+    ctx.save();
+    ctx.translate(b.x, b.y);
+    ctx.rotate(Math.atan2(b.vy, b.vx || 0.001) + Math.PI / 2);
+    ctx.fillStyle = "#ff8fab";
+    ctx.beginPath();
+    ctx.moveTo(0, -hh * 0.55);
+    ctx.lineTo(hw * 0.45, hh * 0.35);
+    ctx.lineTo(0, hh * 0.2);
+    ctx.lineTo(-hw * 0.45, hh * 0.35);
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = "#ffd166";
+    ctx.fillRect(-hw * 0.22, hh * 0.15, hw * 0.44, hh * 0.25);
+    ctx.restore();
+    return;
+  }
+  if (b.explosive) {
+    ctx.fillStyle = "#ff8fab";
+    ctx.beginPath();
+    ctx.arc(b.x, b.y, Math.max(hw, hh) * 0.45, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = "#ffd166";
+    ctx.fillRect(b.x - hw / 2, b.y - hh / 2, hw, hh);
+    return;
+  }
+  ctx.fillStyle = "#7dffb3";
+  ctx.fillRect(b.x - hw / 2, b.y - hh / 2, hw, hh);
+}
+
 function drawPickup(pk) {
   const def = POWERUP_KINDS[pk.type] || POWERUP_KINDS.rapid;
   const bob = Math.sin(pk.wobble) * 2.5;
@@ -1072,6 +1217,13 @@ function drawShip(p, flip) {
     ctx.lineWidth = ready ? 3 : 2;
     ctx.beginPath(); ctx.arc(0, 0, ready ? 28 : 24, 0, Math.PI * 2); ctx.stroke();
   }
+  if ((p.upgradeUntil || 0) > 0) {
+    ctx.font = "900 14px Nunito, sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillStyle = "#caffbf";
+    ctx.fillText("➕", 0, -30);
+  }
 
   const wingIm = loadImg(WINGS[wingIdx].src);
   const coreIm = loadImg(CORES[coreIdx].src);
@@ -1119,22 +1271,7 @@ function drawWorld() {
     ctx.beginPath(); ctx.moveTo(0, H / 2); ctx.lineTo(W, H / 2); ctx.stroke();
     ctx.setLineDash([]);
   }
-  ctx.fillStyle = "#7dffb3";
-  for (const b of bullets) {
-    const h = (b.dmg || 1) > 1 ? 14 : 10;
-    const w = (b.dmg || 1) > 1 ? 5 : 4;
-    if (b.explosive) {
-      ctx.fillStyle = "#ff8fab";
-      ctx.beginPath();
-      ctx.arc(b.x, b.y, Math.max(w, h) * 0.45, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = "#ffd166";
-      ctx.fillRect(b.x - w / 2, b.y - h / 2, w, h);
-    } else {
-      ctx.fillStyle = "#7dffb3";
-      ctx.fillRect(b.x - w / 2, b.y - h / 2, w, h);
-    }
-  }
+  for (const b of bullets) drawPlayerBullet(b);
   ctx.fillStyle = "#ff8fab";
   for (const b of enemyBullets) ctx.fillRect(b.x - 2, b.y - 4, 4, 8);
   for (const w of pulseWaves) {

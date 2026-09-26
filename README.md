@@ -9,6 +9,9 @@ controls, portrait play, no build step — pure static HTML/CSS/JS.
 - Portrait solo + landscape **Coop**
 - **Autofire**, **Cute** (confetti + sounds + bug sprites), **Slow-mo**
 - Candy bunkers, waves, score, lives
+- **Pulse Orb** core: expanding nova rings, bullet wipe, bunker break
+- Enemy variety (wasp, moth, beetle, firefly, sniper) with distinct behaviors
+- Power-up drops: rapid fire, spread, shield, extra life
 
 ## Local dev
 

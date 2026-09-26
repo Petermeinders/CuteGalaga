@@ -1,0 +1,6 @@
+.DS_Store
+Thumbs.db
+_working/
+assets/builder/_debug/
+assets/builder/mockup-ui.png
+assets/builder/template-sheet.jpg

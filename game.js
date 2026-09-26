@@ -92,10 +92,11 @@ const ENEMY_KINDS = {
 };
 
 const POWERUP_KINDS = {
-  rapid: { color: "#5ce1ff", emoji: "⚡", dur: 7 },
-  shield: { color: "#7dffb3", emoji: "🛡", dur: 0 },
-  spread: { color: "#ffd166", emoji: "✦", dur: 8 },
-  life: { color: "#ff6bcb", emoji: "♥", dur: 0 },
+  rapid: { color: "#5ce1ff", glow: "rgba(92, 225, 255, 0.85)", icon: "⚡", dur: 7 },
+  shield: { color: "#7dffb3", glow: "rgba(125, 255, 179, 0.85)", icon: "🛡️", dur: 0 },
+  spread: { color: "#ffd166", glow: "rgba(255, 209, 102, 0.9)", icon: "🔱", dur: 8 },
+  explosive: { color: "#ff8fab", glow: "rgba(255, 143, 171, 0.9)", icon: "💣", dur: 9 },
+  life: { color: "#ff6bcb", glow: "rgba(255, 107, 203, 0.85)", icon: "❤️", dur: 0 },
 };
 
 /* ---------- Images ---------- */
@@ -222,7 +223,7 @@ function makePlayer(id, y, dir, color) {
     hitScale: wing.hitScale || 1,
     cooldown: 0, invuln: 1.2, dir, lives: coreIdx === 3 ? 4 : 3,
     shield: coreIdx === 1, pulseCd: coreIdx === 2 ? 1.2 : 999,
-    rapidUntil: 0, spreadUntil: 0,
+    rapidUntil: 0, spreadUntil: 0, explosiveUntil: 0,
     dragX: null, left: false, right: false, fire: false, color,
   };
 }
@@ -302,12 +303,13 @@ function shootFromEnemy(e) {
 }
 
 function maybeDropPickup(x, y) {
-  if (Math.random() > 0.13) return;
+  if (Math.random() > 0.14) return;
   const roll = Math.random();
   let type = "rapid";
-  if (roll < 0.38) type = "rapid";
-  else if (roll < 0.62) type = "shield";
-  else if (roll < 0.84) type = "spread";
+  if (roll < 0.26) type = "rapid";
+  else if (roll < 0.44) type = "shield";
+  else if (roll < 0.6) type = "spread";
+  else if (roll < 0.76) type = "explosive";
   else type = "life";
   pickups.push({ x, y, vy: 55, type, wobble: Math.random() * Math.PI * 2 });
 }
@@ -315,10 +317,11 @@ function maybeDropPickup(x, y) {
 function applyPickup(p, kind) {
   const def = POWERUP_KINDS[kind];
   if (!def) return;
-  burst(p.x, p.y, def.color, 14, def.emoji);
+  burst(p.x, p.y, def.color, 14, def.icon);
   confetti(p.x, p.y);
   if (kind === "rapid") p.rapidUntil = Math.max(p.rapidUntil, def.dur);
   else if (kind === "spread") p.spreadUntil = Math.max(p.spreadUntil, def.dur);
+  else if (kind === "explosive") p.explosiveUntil = Math.max(p.explosiveUntil || 0, def.dur);
   else if (kind === "shield") { p.shield = true; if (cuteMode) sfxShield(); }
   else if (kind === "life") { p.lives += 1; updateHud(); }
   if (cuteMode) sfxPop();
@@ -619,6 +622,42 @@ function hitCover(bullet) {
   return false;
 }
 
+function scoreEnemyKill(e) {
+  const pts = e.pts || 50;
+  score += e.mode === "dive" ? pts * 2 : pts;
+  burst(e.x, e.y, e.color, 14, "★");
+  confetti(e.x, e.y);
+  maybeDropPickup(e.x, e.y);
+  if (cuteMode) sfxPop();
+  updateHud();
+}
+
+function splashExplosion(x, y, radius, dmg, skipEnemyIdx = -1) {
+  burst(x, y, "#ff8fab", 16);
+  burst(x, y, "#ffd166", 10);
+  pulseWaves.push({ x, y, r: 5, maxR: radius, life: 0.28, thick: 2.5 });
+  if (cuteMode) beep({ freq: 140, dur: 0.07, type: "square", gain: 0.035, slide: -40 });
+  for (let i = enemies.length - 1; i >= 0; i--) {
+    if (i === skipEnemyIdx) continue;
+    const e = enemies[i];
+    if (Math.hypot(e.x - x, e.y - y) > radius) continue;
+    if (e.blink && Math.sin((e.blinkT || 0) * 14) > 0.25) continue;
+    e.hp -= dmg;
+    burst(e.x, e.y, e.color, 5);
+    if (e.hp <= 0) {
+      scoreEnemyKill(e);
+      enemies.splice(i, 1);
+    }
+  }
+  for (let i = covers.length - 1; i >= 0; i--) {
+    const c = covers[i];
+    if (Math.hypot(c.x - x, c.y - y) > radius * 0.9) continue;
+    c.hp -= 1;
+    burst(c.x, c.y, c.color, 4);
+    if (c.hp <= 0) { burst(c.x, c.y, c.color, 7); covers.splice(i, 1); }
+  }
+}
+
 function fireFrom(p) {
   if (p.cooldown > 0 || p.lives <= 0) return;
   const pattern = p.spreadUntil > 0 ? "fan" : BLASTERS[blasterIdx].pattern;
@@ -626,8 +665,9 @@ function fireFrom(p) {
   const shotVy = p.dir === -1 ? -speed : speed;
   const mx = p.x;
   const my = p.dir === -1 ? p.y - p.h / 2 : p.y + p.h / 2;
+  const explosive = (p.explosiveUntil || 0) > 0;
   const mk = (ox, vx = 0, vy = shotVy, dmg = 1) => {
-    bullets.push({ x: mx + ox, y: my, vx, vy, owner: p.id, life: 2.5, dmg });
+    bullets.push({ x: mx + ox, y: my, vx, vy, owner: p.id, life: 2.5, dmg, explosive });
   };
 
   if (pattern === "single") mk(0);
@@ -840,6 +880,7 @@ function update(dt) {
     p.invuln = Math.max(0, p.invuln - dt);
     p.rapidUntil = Math.max(0, (p.rapidUntil || 0) - dt);
     p.spreadUntil = Math.max(0, (p.spreadUntil || 0) - dt);
+    p.explosiveUntil = Math.max(0, (p.explosiveUntil || 0) - dt);
     if (coreIdx === 2) {
       p.pulseCd = Math.max(0, p.pulseCd - dt);
       if (p.pulseCd <= 0) triggerPulse(p);
@@ -952,18 +993,18 @@ function update(dt) {
       const b = bullets[j];
       if (rectsOverlap({ x: b.x, y: b.y, w: 5, h: 10 }, e)) {
         if (e.blink && Math.sin((e.blinkT || 0) * 14) > 0.25) break;
+        const hitX = b.x;
+        const hitY = b.y;
+        const splash = !!b.explosive;
         bullets.splice(j, 1);
         e.hp -= b.dmg || 1;
         burst(e.x, e.y, e.color, 6);
         if (e.hp <= 0) {
-          const pts = e.pts || 50;
-          score += e.mode === "dive" ? pts * 2 : pts;
-          burst(e.x, e.y, e.color, 14, "★");
-          confetti(e.x, e.y);
-          maybeDropPickup(e.x, e.y);
-          if (cuteMode) sfxPop();
+          scoreEnemyKill(e);
           enemies.splice(i, 1);
-          updateHud();
+          if (splash) splashExplosion(hitX, hitY, 50, 1);
+        } else {
+          if (splash) splashExplosion(hitX, hitY, 50, 1, i);
         }
         break;
       }
@@ -982,6 +1023,25 @@ function update(dt) {
 }
 
 /* ---------- Draw ---------- */
+function drawPickup(pk) {
+  const def = POWERUP_KINDS[pk.type] || POWERUP_KINDS.rapid;
+  const bob = Math.sin(pk.wobble) * 2.5;
+  const x = pk.x;
+  const y = pk.y + bob;
+  ctx.save();
+  ctx.font = "800 26px Nunito, sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.shadowColor = def.glow || def.color;
+  ctx.shadowBlur = 14;
+  ctx.fillStyle = "rgba(255,255,255,0.95)";
+  ctx.fillText(def.icon, x, y);
+  ctx.shadowBlur = 6;
+  ctx.fillStyle = def.color;
+  ctx.fillText(def.icon, x, y);
+  ctx.restore();
+}
+
 function drawImg(im, x, y, w, h, rot) {
   if (!im || !im.complete || !im.naturalWidth) return false;
   ctx.save();
@@ -1063,7 +1123,17 @@ function drawWorld() {
   for (const b of bullets) {
     const h = (b.dmg || 1) > 1 ? 14 : 10;
     const w = (b.dmg || 1) > 1 ? 5 : 4;
-    ctx.fillRect(b.x - w / 2, b.y - h / 2, w, h);
+    if (b.explosive) {
+      ctx.fillStyle = "#ff8fab";
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, Math.max(w, h) * 0.45, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "#ffd166";
+      ctx.fillRect(b.x - w / 2, b.y - h / 2, w, h);
+    } else {
+      ctx.fillStyle = "#7dffb3";
+      ctx.fillRect(b.x - w / 2, b.y - h / 2, w, h);
+    }
   }
   ctx.fillStyle = "#ff8fab";
   for (const b of enemyBullets) ctx.fillRect(b.x - 2, b.y - 4, 4, 8);
@@ -1076,19 +1146,7 @@ function drawWorld() {
     ctx.lineWidth = Math.max(1, w.thick * 0.55);
     ctx.beginPath(); ctx.arc(w.x, w.y, w.r * 0.78, 0, Math.PI * 2); ctx.stroke();
   }
-  for (const pk of pickups) {
-    const def = POWERUP_KINDS[pk.type] || POWERUP_KINDS.rapid;
-    ctx.fillStyle = def.color;
-    ctx.beginPath(); ctx.arc(pk.x, pk.y, 11, 0, Math.PI * 2); ctx.fill();
-    ctx.strokeStyle = "rgba(255,255,255,0.7)"; ctx.lineWidth = 2;
-    ctx.stroke();
-    if (cuteMode) {
-      ctx.font = "13px Nunito, sans-serif";
-      ctx.textAlign = "center"; ctx.textBaseline = "middle";
-      ctx.fillStyle = "#1a1030";
-      ctx.fillText(def.emoji, pk.x, pk.y + 0.5);
-    }
-  }
+  for (const pk of pickups) drawPickup(pk);
   for (const e of enemies) drawEnemy(e);
   for (const c of covers) {
     ctx.globalAlpha = 0.45 + 0.55 * (c.hp / 2);

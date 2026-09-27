@@ -59,9 +59,9 @@ const WINGS = [
 ];
 
 const CORES = [
-  { id: "green", name: "Buddy Core", src: "assets/builder/core-green.png", blurb: "Classic smiling buddy." },
-  { id: "star", name: "Star Shield", src: "assets/builder/core-star.png", blurb: "Absorbs 1 hit each wave." },
-  { id: "blue", name: "Pulse Orb", src: "assets/builder/core-blue.png", blurb: "Big nova shockwave every few sec." },
+  { id: "pod", name: "Pod", src: "assets/builder/core-pod.png", blurb: "Classic mint kitty buddy." },
+  { id: "sushi", name: "Sushi", src: "assets/builder/core-sushi.png", blurb: "Absorbs 1 hit each wave." },
+  { id: "cupid", name: "Cupid Kitty", src: "assets/builder/core-cupid.png", blurb: "Big nova shockwave every few sec." },
   { id: "rocket", name: "Rocket Core", src: "assets/builder/core-rocket.png", blurb: "Extra life at start." },
 ];
 

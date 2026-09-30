@@ -1035,6 +1035,7 @@ function update(dt) {
 
   for (let i = enemies.length - 1; i >= 0; i--) {
     const e = enemies[i];
+    if (!e) continue; // splash damage may have removed enemies earlier in this pass
     if (e.enterDelay > 0) {
       e.enterDelay -= dt; e.y += 120 * dt; e.x = e.bx + formation.ox;
       continue;
@@ -1341,9 +1342,13 @@ function draw() {
 function loop(ts) {
   const dt = Math.min(0.033, (ts - lastTs) / 1000 || 0);
   lastTs = ts;
-  update(dt);
-  draw();
   requestAnimationFrame(loop);
+  try {
+    update(dt);
+    draw();
+  } catch (err) {
+    console.error("Game loop error:", err);
+  }
 }
 
 syncBuilderUI();
